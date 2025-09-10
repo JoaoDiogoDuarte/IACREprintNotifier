@@ -1,6 +1,6 @@
 # Saucy ePrint notifier
 
-Get IACR ePrint notifications from authors you care about by email. This is done via RSS parsing, hashing and using some free email sending service.
+Get IACR ePrint notifications from authors you care about by email and Zotero. This is done via RSS parsing, hashing and using some free email sending service.
 I made this because I could not find a tool that suited my needs.
 
 ## Disclaimer on AI generated code
@@ -11,21 +11,24 @@ It's more of a small quality of life enhancement.
 
 ## How to get this to work:
 
-1. Python 3.whocares (use a virtual env for your sanity)
+1. Python 3.whocares (joking aside, at least 3.7 and use a virtual env for your sanity)
 2. A Mailgun account (https://www.mailgun.com/ free if you only send emails to yourself)
-3. Install requirements (use `pip install -r requirements.txt`)
-4. Edit the domain, API key, from and to email addresses in `eprint.py` *or* store them in your environment as `$MG_TO`, `$MG_API_KEY` and `$MG_DOMAIN` (recommended).
-5. Edit `authors.txt` to include the authors you want to get updates from
-6. Make sure `save.txt` is initially clean: the program hashes the data associated with the new publication and store it in `save.txt` to avoid sending duplicate papers.
-7. Have some timer run `/path/to/.env/bin/python eprint.py` to get notifications by email (will end up in spam, so flag it as not spam). They will look like this:
+3. A Zotero account (https://www.zotero.org/), and an API key and API User ID (see https://www.zotero.org/settings/security#applications) 
+4. Install requirements (use `pip install -r requirements.txt`)
+5. Edit the domain, API key, from and to email addresses in `eprint.py` *or* store them in your environment (see code for environment variable names)
+6. Repeat above, but for the Zotero API key and user ID
+7. Edit `authors.txt` to include the authors you want to get updates from
+8. Make sure `save.txt` is initially clean: the program hashes the data associated with the new publication and store it in `save.txt` to avoid sending duplicate papers
+9. Have some timer run `/path/to/.env/bin/python eprint.py` to get notifications by email (will end up in spam, so flag it as not spam). They will look like this:
 
 ```
+New IACR papers matching your author list:
+
 Title:   Simple threshold decryption secure against adaptive corruptions
 Link:    https://eprint.iacr.org/2025/1578
 Date:    Tue, 02 Sep 2025 17:25:21 +0000
 Authors: Victor Shoup
 
----
 Title:   How Hard Can It Be to Formalize a Proof? Lessons from Formalizing CryptoBox Three Times in EasyCrypt
 Link:    https://eprint.iacr.org/2025/1569
 Date:    Tue, 02 Sep 2025 05:49:10 +0000
@@ -37,9 +40,10 @@ Link:    https://eprint.iacr.org/2025/1562
 Date:    Sun, 31 Aug 2025 12:59:04 +0000
 Authors: Manuel Barbosa, Matthias J. Kannwischer, Thing-han Lim, Peter Schwabe, Pierre-Yves Strub
 
----
-
 ```
+
+Technically you can either have just a Zotero or just a Mailgun account and comment out the appropriate line(s) of code.
+You do you.
 
 ### Note on the timer 
 
