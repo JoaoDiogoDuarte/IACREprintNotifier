@@ -1,0 +1,43 @@
+Manuel Barbosa
+Peter Schwabe
+Federico Giacon
+Felix Heuer
+Bertram Poettering
+Daniel J. Bernstein
+Andreas Hülsing
+Lorenz Panny
+Tiago Oliveira
+Mihir Bellare
+Phillip Rogaway
+Shafi Goldwasser
+Michel Abdalla
+Marc Fischlin
+Douglas Stebila
+Nina Bindel
+Eike Kiltz
+Cas Cremers
+Alexander Dax
+Niklas Medinger
+Martin Albrecht
+Mark Zhandry
+Deirdre Connolly
+Bas Westerbaan
+Hugo Krawczyk
+Victor Shoup
+Elizabeth A. Quaglia
+Sofía Celi
+Sophie Schmieg
+Oded Goldreich
+Shafi Goldwasser
+Silvio Micali
+David Pointcheval
+Jean-Sébastien Coron
+Adi Shamir
+Turgut Hanoymak
+Santiago Arranz Olmos
+Gilles Barthe
+Lionel Blatter
+Benjamin Grégoire
+Vincent Laporte
+Mark Zhandry
+Steven D Galbraith
