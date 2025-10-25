@@ -101,8 +101,6 @@ log = None   # will be set in __main__
 # ----------------------------------------------------------------------
 # ── SMALL HELPERS -------------------------------------------------------
 # ----------------------------------------------------------------------
-def hours_ago(hours: int = 24) -> float:
-    return time.time() - datetime.timedelta(hours=hours).total_seconds()
 
 def title_hash(title: str) -> str:
     return hashlib.md5(title.encode("utf-8")).hexdigest()
@@ -430,8 +428,6 @@ def fetch_and_process(feed_url: str, authors_of_interest: list) -> None:
 
     log.info("Found %d entries in the feed", len(feed.entries))
     matches = []
-    cutoff_ts = hours_ago()
-    cutoff_dt = datetime.datetime.fromtimestamp(cutoff_ts)
 
     for entry in feed.entries:
         # ---- sanity checks -------------------------------------------------
@@ -448,9 +444,6 @@ def fetch_and_process(feed_url: str, authors_of_interest: list) -> None:
         existing_hashes = read_existing_hashes()
         if h in existing_hashes:
             log.debug("Duplicate (already seen): %s", entry.title)
-            continue
-        if entry_dt > cutoff_dt:
-            log.debug("Too recent (outside %dh window): %s", 24, entry.title)
             continue
 
         # ---- fuzzy author match --------------------------------------------
