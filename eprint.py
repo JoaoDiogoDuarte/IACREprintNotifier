@@ -1,476 +1,246 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Watch the IACR ePrint RSS feed and email a digest of papers by authors of interest."""
 
 import argparse
-import datetime
-import hashlib
 import logging
 import os
-import time
-import json
+import re
+import sys
+import unicodedata
 from pathlib import Path
 
 import feedparser
 import requests
-from fuzzywuzzy import fuzz
-from pyzotero import zotero
+from rapidfuzz import fuzz
 
-# ----------------------------------------------------------------------
-# ── CONFIGURATION (env vars take precedence over the hard‑coded values)
-# ----------------------------------------------------------------------
 FEED_URL = "https://eprint.iacr.org/rss/rss.xml"
 SCRIPT_DIR = Path(__file__).resolve().parent
+AUTHORS_PATH = SCRIPT_DIR / "authors.txt"
+STATE_PATH = SCRIPT_DIR / "save.txt"
 
-TMP_PDF_DIR = SCRIPT_DIR / "tmp_pdfs"          # ← folder beside the script
-TMP_PDF_DIR.mkdir(parents=True, exist_ok=True)  # create it once at import time
+# Fuzzy-match threshold for author names (0-100).
+MATCH_THRESHOLD = 90
 
-# ---- Zotero credentials -------------------------------------------------
-ZOTERO_USER_ID_HARD = ""   # e.g. "1234567"
-ZOTERO_API_KEY_HARD = ""   # e.g. "abcd1234..."
+log = logging.getLogger("eprint")
 
-def get_zotero_credentials():
-    uid = os.getenv("ZOTERO_USER_ID") or ZOTERO_USER_ID_HARD
-    key = os.getenv("ZOTERO_API_KEY") or ZOTERO_API_KEY_HARD
-    if not uid or not key:
-        raise RuntimeError("Zotero credentials missing – set env vars or hard‑code them.")
-    return uid, key
-
-CACHE_PATH = SCRIPT_DIR / ".zotero_index.json"
-
-def load_cached_index():
-    if CACHE_PATH.is_file():
-        try:
-            with CACHE_PATH.open() as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-def save_cached_index(index):
-    with CACHE_PATH.open("w") as f:
-        json.dump(index, f)
-
-def get_existing_items(zot, collection_key):
-    cached = load_cached_index()
-    if cached.get("collection_key") == collection_key:
-        return cached["index"]
-
-    # … (the pagination loop from earlier) …
-    index = {...}  # built as shown above
-    save_cached_index({"collection_key": collection_key, "index": index})
-    return index
-
-# ---- Email -----------------------------------------------------
-EMAIL_RECIPIENT_HARD = ""   # e.g. "you@example.com"
-EMAIL_DOMAIN_HARD = ""   # e.g. "sandbox123..."
-EMAIL_API_KEY_HARD = ""   # e.g. "932876..."
-
-def get_recipient():
-    return os.getenv("MG_TO") or EMAIL_RECIPIENT_HARD
-
-def get_mailgun_api_key():
-    return os.getenv("MG_API_KEY") or EMAIL_API_KEY_HARD
-
-def get_mailgun_domain():
-    return os.getenv("MG_DOMAIN") or EMAIL_DOMAIN_HARD
-
-# ---- Zotero collection name -----------------------------------------------
-ZOTERO_COLLECTION_NAME = "Email Updates"
 
 # ----------------------------------------------------------------------
-# ── COMMAND‑LINE & LOGGING --------------------------------------------
+# Configuration
 # ----------------------------------------------------------------------
-def parse_cli() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Watch the IACR RSS feed for papers by a set of authors."
-    )
-    p.add_argument("-d", "--debug", action="store_true", help="Enable debug output")
-    return p.parse_args()
-
-def configure_logger(debug: bool) -> logging.Logger:
-    level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)-8s %(message)s",
-        level=level,
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    return logging.getLogger(__name__)
-
-log = None   # will be set in __main__
-
-# ----------------------------------------------------------------------
-# ── SMALL HELPERS -------------------------------------------------------
-# ----------------------------------------------------------------------
-
-def title_hash(title: str) -> str:
-    return hashlib.md5(title.encode("utf-8")).hexdigest()
-
-def read_existing_hashes() -> set:
-    path = SCRIPT_DIR / "save.txt"
-    if path.is_file():
-        with path.open() as f:
-            return {ln.strip() for ln in f if ln.strip()}
-    return set()
-
-def save_new_hashes(matches: list, existing: set) -> None:
-    """Append hashes of newly‑saved entries to save.txt."""
-    path = SCRIPT_DIR / "save.txt"
-    with path.open("a") as f:
-        for entry, _ in matches:
-            h = title_hash(entry.title)
-            if h not in existing:
-                f.write(f"{h}\n")
-    log.info("Saved %d new hashes to %s", len(matches), path)
-
-def fuzzy_match(author: str, entry_authors: list, thresh: int = 80) -> bool:
-    return any(fuzz.token_sort_ratio(author, a) >= thresh for a in entry_authors)
-
-def print_aligned(entry, authors):
-    lines = [
-        f"Title:       {entry.title}",
-        f"Link:        {entry.link}",
-        f"Published:   {entry.published}",
-        f"Authors:     {', '.join(authors)}",
-    ]
-    max_len = max(len(l.split(":")[0]) for l in lines) + 1
-    fmt = f"{{:<{max_len}}} {{}}"
-    for line in lines:
-        key, val = line.split(":", 1)
-        log.info(fmt.format(key + ":", val.strip()))
-    log.info("")
-
-def return_pdf_links(matches) -> list:
-    pdf_links = [entry.link.rstrip("/") + ".pdf" for entry, _ in matches]
-    log.debug("Returning %d PDF links for post‑email processing", len(pdf_links))
-    return pdf_links
-
-# ----------------------------------------------------------------------
-# ── ZOTERO HELPERS ----------------------------------------------------
-# ----------------------------------------------------------------------
-def get_zotero_client():
-    uid, key = get_zotero_credentials()
-    return zotero.Zotero(uid, "user", key)
-
-def ensure_collection(zot, name: str) -> str:
-    """
-    Return the collection key for *name*.  Create the collection if it does not exist.
-    """
-    collections = zot.collections()
-    for coll in collections:
-        if coll.get("data", {}).get("name") == name:
-            return coll["data"]["key"]
-    # Not found → create it
-    payload = [{"name": name}]
-    created = zot.create_collections(payload)
-    if not created:
-        raise RuntimeError(f"Failed to create Zotero collection '{name}'")
-    collections = zot.collections()
-    for coll in collections:
-        if coll.get("data", {}).get("name") == name:
-            log.info("Created Zotero collection '%s' (key=%s)", name, new_key)
-            return coll["data"]["key"]
-    return new_key
-
-def download_pdf(entry) -> Path | None:
-    """
-    Download the PDF for a feed entry into ``SCRIPT_DIR/tmp_pdfs``.
-    Returns the absolute ``Path`` of the saved file, or ``None`` if the
-    download fails or the URL does not point to a PDF.
-    """
-    pdf_url = entry.link.rstrip("/") + ".pdf"
-
-    # Derive a safe filename from the title – replace filesystem‑unsafe chars
-    safe_title = "".join(ch if ch.isalnum() or ch in " ._-()" else "_" for ch in entry.title)
-    filename = f"{safe_title}.pdf"
-    dest_path = TMP_PDF_DIR / filename
-
-    try:
-        # Stream the response so we don’t hold the whole file in memory
-        with requests.get(pdf_url, timeout=20, stream=True) as r:
-            r.raise_for_status()
-            ct = r.headers.get("Content-Type", "").lower()
-            if "pdf" not in ct:
-                log.warning("URL %s returned non‑PDF content type %s", pdf_url, ct)
-                return None
-
-            # Write to disk chunk‑by‑chunk
-            with dest_path.open("wb") as out_f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    if chunk:               # filter out keep‑alive chunks
-                        out_f.write(chunk)
-
-        log.info("✅ PDF saved to %s", dest_path)
-        return dest_path
-
-    except Exception as exc:                     # includes HTTP errors, timeouts, etc.
-        log.error("Failed to fetch PDF from %s: %s", pdf_url, exc)
-        # Clean up a partially written file, if any
-        if dest_path.exists():
-            try:
-                dest_path.unlink()
-            except Exception:
-                pass
-        return None
-
-def get_existing_items(zot, collection_key):
-    """
-    Returns a dict mapping a normalized identifier → Zotero item key.
-    By default we index by lower‑cased title, but you can also add DOI/arXiv.
-    """
-    existing = {}
-    # Zotero paginates results; 100 is the max per page.
-    start = 0
-    while True:
-        items = zot.collection_items(collection_key, limit=100, start=start)
-        if not items:
-            break
-        for it in items:
-            data = it.get("data", {})
-            # Normalise the title for quick look‑ups
-            title_norm = data.get("title", "").strip().lower()
-            if title_norm:
-                existing[title_norm] = it["key"]
-
-            # Optional: also index by DOI or arXiv ID if present
-            doi = data.get("DOI")
-            if doi:
-                existing[doi.lower()] = it["key"]
-            # Example for arXiv: store the arXiv identifier if you keep it in extra
-            extra = data.get("extra", "")
-            for line in extra.splitlines():
-                if line.lower().startswith("arxiv:"):
-                    arxiv_id = line.split(":", 1)[1].strip().lower()
-                    existing[arxiv_id] = it["key"]
-        start += len(items)
-    return existing
-
-def upload_entry_to_zotero(entry, collection_key: str) -> None:
-    """
-    Creates a Zotero item only if it isn’t already present in the collection.
-    Duplicates are detected by title (case‑insensitive) and, if available,
-    by DOI or arXiv ID.
-    """
-    zot = get_zotero_client()
-
-    existing_index = get_existing_items(zot, collection_key)
-
-    creators = []
-    for name in [a.get("name", "").strip() for a in entry.get("authors", [])]:
-        parts = name.rsplit(" ", 1)
-        first, last = ("", parts[0]) if len(parts) == 1 else (parts[0], parts[1])
-        creators.append({"creatorType": "author", "firstName": first, "lastName": last})
-
-    # Normalised title for comparison
-    title_norm = entry.title.strip().lower()
-
-    # Try to pull a DOI or arXiv ID from the feed entry if it exists
-    # (adjust the attribute names according to the actual feed structure)
-    doi = getattr(entry, "doi", None)
-    arxiv = getattr(entry, "arxiv_id", None)
-
-    duplicate_key = None
-    if title_norm in existing_index:
-        duplicate_key = existing_index[title_norm]
-    elif doi and doi.lower() in existing_index:
-        duplicate_key = existing_index[doi.lower()]
-    elif arxiv and arxiv.lower() in existing_index:
-        duplicate_key = existing_index[arxiv.lower()]
-
-    if duplicate_key:
-        log.info(
-            "⏭️ Skipping duplicate – item already in collection (key=%s, title=%s)",
-            duplicate_key,
-            entry.title,
-        )
-        return  # Nothing else to do
-
-    item = {
-        "itemType": "journalArticle",
-        "title": entry.title,
-        "url": entry.link,
-        "date": entry.published,
-        "creators": creators,
-        "collections": [collection_key],
+def mailgun_config() -> dict:
+    """Read Mailgun settings from the environment. Missing values are returned as None."""
+    return {
+        "api_key": os.getenv("MG_API_KEY"),
+        "domain": os.getenv("MG_DOMAIN"),
+        "recipient": os.getenv("MG_TO"),
+        "sender": os.getenv("MG_FROM"),
+        "base_url": os.getenv("MG_BASE_URL", "https://api.mailgun.net/v3"),
     }
 
-    # If you have a DOI or arXiv ID you want to store, add it now:
-    if doi:
-        item["DOI"] = doi
-    if arxiv:
-        # Storing arXiv ID in the “extra” field is common practice
-        item["extra"] = f"arXiv:{arxiv}"
-
-    created = zot.create_items([item])
-    if not created:
-        raise RuntimeError("Zotero item creation failed")
-
-    item_key = created["successful"]["0"]["key"]
-    log.info("✅ Created Zotero item %s (collection %s)", item_key, collection_key)
-
-    pdf_path = download_pdf(entry)
-    attach_result = zot.attachment_simple(
-        files=[str(pdf_path)],      # convert Path → str for the API
-        parentid=item_key
-    )
-
-    if attach_result["failure"] == []:
-        logging.info("📎 Attached (attachment key %s)", item_key)
-        pdf_path.unlink(missing_ok=True)
-
-    else:
-        logging.warning("❌ Failed to attach %s – response: %s", fname, info)
 
 # ----------------------------------------------------------------------
-# ── EMAIL HELPERS -----------------------------------------------------
+# State: which papers have already been mailed
+# ----------------------------------------------------------------------
+def eprint_id(entry) -> str | None:
+    """Extract the stable ePrint identifier, e.g. '2025/1578', from an entry link."""
+    match = re.search(r"/(\d{4}/\d+)", entry.link)
+    return match.group(1) if match else None
+
+
+def read_seen_ids() -> set:
+    if not STATE_PATH.is_file():
+        return set()
+    with STATE_PATH.open() as f:
+        return {line.strip() for line in f if line.strip()}
+
+
+def append_seen_ids(ids) -> None:
+    """Append ids to the state file, keeping it sorted and free of duplicates."""
+    combined = sorted(read_seen_ids() | set(ids))
+    tmp_path = STATE_PATH.with_suffix(".tmp")
+    tmp_path.write_text("\n".join(combined) + "\n")
+    tmp_path.replace(STATE_PATH)
+    log.info("Recorded %d new paper(s); state now holds %d.", len(set(ids)), len(combined))
+
+
+# ----------------------------------------------------------------------
+# Author matching
+# ----------------------------------------------------------------------
+def normalise(name: str) -> str:
+    """Strip accents, punctuation and case so that 'Hülsing' matches 'Hulsing'."""
+    decomposed = unicodedata.normalize("NFKD", name)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z ]", " ", stripped.lower()).strip()
+
+
+def surname(name: str) -> str:
+    parts = normalise(name).split()
+    return parts[-1] if parts else ""
+
+
+def is_match(wanted: str, candidate: str) -> bool:
+    """A candidate matches when the surnames agree and the full names are close enough."""
+    if surname(wanted) != surname(candidate):
+        return False
+    return fuzz.token_sort_ratio(normalise(wanted), normalise(candidate)) >= MATCH_THRESHOLD
+
+
+def matching_authors(entry_authors: list, authors_of_interest: list) -> list:
+    """Return the authors of interest that appear on this paper."""
+    return [w for w in authors_of_interest if any(is_match(w, a) for a in entry_authors)]
+
+
+def load_authors() -> list:
+    if not AUTHORS_PATH.is_file():
+        log.error("Missing authors.txt at %s", AUTHORS_PATH)
+        sys.exit(1)
+
+    seen, authors = set(), []
+    with AUTHORS_PATH.open() as f:
+        for line in f:
+            name = line.strip()
+            key = normalise(name)
+            if name and key not in seen:
+                seen.add(key)
+                authors.append(name)
+    return authors
+
+
+# ----------------------------------------------------------------------
+# Email
 # ----------------------------------------------------------------------
 def build_email_body(matches: list) -> str:
-    """
-    Returns a plain‑text body that lists each match *and* the direct PDF link.
-    """
-    parts = ["New IACR papers matching your author list:\n"]
-    for entry, authors in matches:
-        pdf_link = entry.link.rstrip("/") + ".pdf"
+    parts = ["New IACR ePrint papers matching your author list:\n"]
+    for entry, hits in matches:
         parts.append(f"Title   : {entry.title}")
         parts.append(f"Link    : {entry.link}")
-        parts.append(f"PDF Link: {pdf_link}")
+        parts.append(f"PDF     : {entry.link.rstrip('/')}.pdf")
         parts.append(f"Date    : {entry.published}")
-        parts.append(f"Authors : {', '.join(authors)}")
-        parts.append("")   # blank line between entries
+        parts.append(f"Authors : {', '.join(a.get('name', '').strip() for a in entry.get('authors', []))}")
+        parts.append(f"Matched : {', '.join(hits)}")
+        parts.append("")
     return "\n".join(parts)
 
-def send_email(matches: list) -> None:
-    """
-    Sends the digest via mailgun and returns a list of the **PDF URLs** that were
-    included in the email.  The caller can then process those URLs
-    independently (e.g. upload to Zotero).
-    """
-    if not matches:
-        log.info("No matches – skipping email.")
-        return []
 
-    body = ""
-    body = build_email_body(matches)
+def send_email(matches: list) -> bool:
+    """Send the digest. Returns True only if Mailgun accepted the message."""
+    cfg = mailgun_config()
+    missing = [k for k in ("api_key", "domain", "recipient") if not cfg[k]]
+    if missing:
+        log.error("Mailgun not configured, missing: %s", ", ".join(missing))
+        return False
 
-    recipient = get_recipient()
-    if not recipient:
-        log.warning("Recipient address not set – email not sent.")
-        return []
-
-    # get environment variables
-    domain_id = get_mailgun_domain()
-
-    if not domain_id:
-        log.warning("Domain not set – email not sent.")
-        return []
-    api_key  = get_mailgun_api_key()
-
-    if not api_key:
-        log.warning("API key not set – email not sent.")
-        return []
-
-    domain = f'https://api.mailgun.net/v3/{domain_id}.mailgun.org/messages'
-    sender = f'Mailgun Sandbox <postmaster@{domain_id}.mailgun.org>'
-
-    data = {
-        "from": sender,
-        "to": recipient,
-        "subject": "New papers from your authors of interest!",
-        "text": body,
-    }
+    sender = cfg["sender"] or f"ePrint Notifier <postmaster@{cfg['domain']}>"
+    subject = f"{len(matches)} new ePrint paper(s) from your authors"
 
     try:
-        resp = requests.post(domain, auth=("api", api_key), data=data, timeout=15)
+        resp = requests.post(
+            f"{cfg['base_url']}/{cfg['domain']}/messages",
+            auth=("api", cfg["api_key"]),
+            data={
+                "from": sender,
+                "to": cfg["recipient"],
+                "subject": subject,
+                "text": build_email_body(matches),
+            },
+            timeout=30,
+        )
         resp.raise_for_status()
-        log.info("Email sent successfully! (%s)", resp.text[:120])
     except requests.RequestException as exc:
         log.error("Failed to send email: %s", exc)
+        return False
 
-
-
-# ----------------------------------------------------------------------
-# ── ZOTERO UPLOADER ---------------------------------------------------
-# ----------------------------------------------------------------------
-def upload_pdfs_to_zotero(pdf_urls: list, matches: list) -> None:
-    """
-    Given the PDF URLs that were mailed and the original `matches`,
-    download each PDF, create a Zotero item and attach the file.
-    All items are placed in the collection named ``ZOTERO_COLLECTION_NAME``.
-    """
-    if not pdf_urls:
-        log.info("No PDF URLs to process for Zotero – exiting uploader.")
-        return
-
-    zot = get_zotero_client()
-    collection_key = ensure_collection(zot, ZOTERO_COLLECTION_NAME)
-
-    # Build a quick lookup from PDF URL → original feed entry (needed for metadata)
-    url_to_entry = {e.link.rstrip("/") + ".pdf": e for e, _ in matches}
-
-    for pdf_url in pdf_urls:
-        entry = url_to_entry.get(pdf_url)
-        if not entry:
-            log.warning("Could not locate feed entry for PDF URL %s – skipping", pdf_url)
-            continue
-
-        upload_entry_to_zotero(entry, collection_key)
+    log.info("Email sent to %s", cfg["recipient"])
+    return True
 
 
 # ----------------------------------------------------------------------
-# ── MAIN FEED PROCESSING ----------------------------------------------
+# Feed processing
 # ----------------------------------------------------------------------
-def fetch_and_process(feed_url: str, authors_of_interest: list) -> None:
+def fetch_matches(feed_url: str, authors_of_interest: list) -> list:
+    """Return [(entry, matched_authors)] for unseen feed entries by authors of interest."""
     log.debug("Fetching feed from %s", feed_url)
     feed = feedparser.parse(feed_url)
 
+    if not feed.entries:
+        log.error("No entries in feed (%s)", getattr(feed, "bozo_exception", "empty response"))
+        return []
     if feed.bozo:
-        log.error("Feed parsing error: %s", feed.bozo_exception)
-        return
+        log.warning("Feed reported a parse issue but returned entries: %s", feed.bozo_exception)
 
     log.info("Found %d entries in the feed", len(feed.entries))
+    seen_ids = read_seen_ids()
     matches = []
 
     for entry in feed.entries:
-        # ---- sanity checks -------------------------------------------------
-        if "published_parsed" not in entry:
-            log.debug("Skipping entry without published date: %s", entry.title)
+        paper_id = eprint_id(entry)
+        if not paper_id:
+            log.warning("Could not extract an ePrint id from %s, skipping", entry.link)
             continue
-        entry_dt = datetime.datetime.fromtimestamp(time.mktime(entry.published_parsed))
+        if paper_id in seen_ids:
+            log.debug("Already seen: %s", paper_id)
+            continue
 
-        # ---- author extraction ---------------------------------------------
         entry_authors = [a.get("name", "").strip() for a in entry.get("authors", [])]
+        hits = matching_authors(entry_authors, authors_of_interest)
+        if hits:
+            log.info("Match %s: %s (%s)", paper_id, entry.title, ", ".join(hits))
+            matches.append((entry, hits))
 
-        # ---- duplicate / time‑window filtering ------------------------------
-        h = title_hash(entry.title)
-        existing_hashes = read_existing_hashes()
-        if h in existing_hashes:
-            log.debug("Duplicate (already seen): %s", entry.title)
-            continue
+    return matches
 
-        # ---- fuzzy author match --------------------------------------------
-        if any(fuzzy_match(a, entry_authors) for a in authors_of_interest):
-            matches.append((entry, tuple(entry_authors)))
-            print_aligned(entry, entry_authors)
 
-    send_email(matches)
-    pdf_urls = return_pdf_links(matches)
-    upload_pdfs_to_zotero(pdf_urls, matches)
-    save_new_hashes(matches, existing_hashes)
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Watch the IACR ePrint RSS feed for papers by a set of authors."
+    )
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug output")
+    parser.add_argument(
+        "--seed",
+        action="store_true",
+        help="Record every current match as seen without sending email (run once when migrating).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the digest instead of emailing it, and leave the state file untouched.",
+    )
+    args = parser.parse_args()
 
-# ----------------------------------------------------------------------
-# ── ENTRY POINT -------------------------------------------------------
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    args = parse_cli()
-    log = configure_logger(args.debug)
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        level=logging.DEBUG if args.debug else logging.INFO,
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
-    # ---- load author list ------------------------------------------------
-    authors_path = SCRIPT_DIR / "authors.txt"
-    if not authors_path.is_file():
-        log.error("Missing authors.txt at %s", authors_path)
-        exit(1)
-
-    with authors_path.open() as f:
-        authors_of_interest = [ln.strip() for ln in f if ln.strip()]
-
+    authors_of_interest = load_authors()
     log.info("Monitoring %d authors", len(authors_of_interest))
-    fetch_and_process(FEED_URL, authors_of_interest)
+
+    matches = fetch_matches(FEED_URL, authors_of_interest)
+    if not matches:
+        log.info("No new papers.")
+        return 0
+
+    ids = [eprint_id(entry) for entry, _ in matches]
+
+    if args.seed:
+        append_seen_ids(ids)
+        log.info("Seeded state with %d paper(s), no email sent.", len(ids))
+        return 0
+
+    if args.dry_run:
+        print(build_email_body(matches))
+        return 0
+
+    # Only record papers as seen once the email has actually gone out, so a
+    # delivery failure means they are retried on the next run rather than lost.
+    if not send_email(matches):
+        return 1
+
+    append_seen_ids(ids)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

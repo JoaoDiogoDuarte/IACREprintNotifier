@@ -1,0 +1,48 @@
+name: ePrint author digest
+
+on:
+  schedule:
+    # Every day at 07:00 UTC. The IACR feed holds the 100 most recent papers,
+    # so a daily run leaves a comfortable margin against missing anything.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: eprint-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check the feed and send the digest
+        env:
+          MG_API_KEY: ${{ secrets.MG_API_KEY }}
+          MG_DOMAIN: ${{ secrets.MG_DOMAIN }}
+          MG_TO: ${{ secrets.MG_TO }}
+          MG_FROM: ${{ secrets.MG_FROM }}
+        run: python eprint.py
+
+      - name: Record the papers that were mailed
+        run: |
+          if git diff --quiet -- save.txt; then
+            echo "No new papers, nothing to commit."
+            exit 0
+          fi
+          git config user.name "eprint-bot"
+          git config user.email "eprint-bot@users.noreply.github.com"
+          git add save.txt
+          git commit -m "chore: record mailed papers"
+          git push

@@ -1,78 +1,122 @@
 # Saucy ePrint notifier
 
-Get IACR ePrint notifications from authors you care about by email and Zotero. This is done via RSS parsing, hashing and using some free email sending service.
-I made this because I could not find a tool that suited my needs.
+Get an email when one of your favourite authors posts to IACR ePrint. Parses the ePrint RSS
+feed, fuzzy-matches authors against a list you control, and mails you a digest of anything new.
 
 ## Disclaimer on AI generated code
 
-I relied on ChatGPT and Proton Lumo for large amounts of code generation as I have better things to do (i.e. actually reading the papers) than writing a tool like this by hand.
-This seemed like reasonable approach as this code isn't critical nor production level, and the task itself is non-essential shit-work (see https://zachholman.com/posts/shit-work/). 
-It's more of a small quality of life enhancement.
+I relied on LLMs for large amounts of code generation as I have better things to do (i.e. actually
+reading the papers) than writing a tool like this by hand. This seemed like a reasonable approach as
+this code isn't critical nor production level, and the task itself is non-essential shit-work (see
+https://zachholman.com/posts/shit-work/). It's more of a small quality of life enhancement.
 
-## How to get this to work:
+## How it works
 
-1. Python 3.whocares (joking aside, at least 3.7 and use a virtual env for your sanity)
-2. A Mailgun account (https://www.mailgun.com/ free if you only send emails to yourself)
-3. A Zotero account (https://www.zotero.org/), and an API key and API User ID (see https://www.zotero.org/settings/security#applications) 
-4. Install requirements (use `pip install -r requirements.txt`)
-5. Edit the domain, API key, from and to email addresses in `eprint.py` *or* store them in your environment (see code for environment variable names)
-6. Repeat above, but for the Zotero API key and user ID
-7. Edit `authors.txt` to include the authors you want to get updates from
-8. Make sure `save.txt` is initially clean: the program hashes the data associated with the new publication and store it in `save.txt` to avoid sending duplicate papers
-9. Have some timer run `/path/to/.env/bin/python eprint.py` to get notifications by email (will end up in spam, so flag it as not spam). They will look like this:
+1. Fetch `https://eprint.iacr.org/rss/rss.xml` (the 100 most recent papers).
+2. Skip anything whose ePrint id (e.g. `2026/1693`) is already in `save.txt`.
+3. Keep papers with an author matching a line in `authors.txt`.
+4. Mail the digest via Mailgun.
+5. **Only then** record those ids in `save.txt`. A failed send means the papers are retried on the
+   next run rather than silently lost.
 
+Matching requires the surnames to be equal after accent/case stripping, then scores the full names
+with `rapidfuzz` at a threshold of 90. So `Andreas Hülsing` matches `Andreas Hulsing`, but
+`Peter Schwabe` will not swallow `Peter Schweizer`.
+
+## Setup
+
+### 1. Mailgun
+
+Create a Mailgun account (https://www.mailgun.com/, free tier is fine for mailing yourself). You
+need the API key and the sending domain. On a sandbox domain you must add your address under
+*Authorized Recipients* first, and mail will land in spam until you flag it as not spam.
+
+Configuration is read from the environment only, there are no hard-coded credentials:
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `MG_API_KEY` | yes | Mailgun private API key |
+| `MG_DOMAIN` | yes | Full sending domain, e.g. `sandbox123.mailgun.org` |
+| `MG_TO` | yes | Your address |
+| `MG_FROM` | no | Defaults to `postmaster@$MG_DOMAIN` |
+| `MG_BASE_URL` | no | Defaults to `https://api.mailgun.net/v3`, set to the `api.eu` host for EU accounts |
+
+### 2. Authors
+
+Edit `authors.txt`, one name per line. Duplicates are ignored.
+
+### 3. Local run
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python eprint.py --dry-run     # print the digest, change nothing
+.venv/bin/python eprint.py --seed        # mark everything currently matching as seen, send nothing
+.venv/bin/python eprint.py               # for real
 ```
-New IACR papers matching your author list:
 
-Title:   Simple threshold decryption secure against adaptive corruptions
-Link:    https://eprint.iacr.org/2025/1578
-Date:    Tue, 02 Sep 2025 17:25:21 +0000
-Authors: Victor Shoup
+Run `--seed` once before the first real run, otherwise you get a digest of every matching paper
+still in the feed window.
 
-Title:   How Hard Can It Be to Formalize a Proof? Lessons from Formalizing CryptoBox Three Times in EasyCrypt
-Link:    https://eprint.iacr.org/2025/1569
-Date:    Tue, 02 Sep 2025 05:49:10 +0000
-Authors: François Dupressoir, Andreas Hülsing, Cameron Low, Matthias Meijers, Charlotte Mylog, Sabine Oechsner
+### 4. Scheduled runs on GitHub Actions
 
----
-Title:   Formally Verified Correctness Bounds for Lattice-Based Cryptography
-Link:    https://eprint.iacr.org/2025/1562
-Date:    Sun, 31 Aug 2025 12:59:04 +0000
-Authors: Manuel Barbosa, Matthias J. Kannwischer, Thing-han Lim, Peter Schwabe, Pierre-Yves Strub
+`.github/workflows/eprint.yml` runs daily at 07:00 UTC and commits `save.txt` back to the repo, so
+state survives between runs. This repo's origin is Codeberg, so add GitHub as a second remote:
 
+```bash
+git remote add github git@github.com:YOURNAME/eprintupdates.git
+git push github main
 ```
 
-Technically you can either have just a Zotero or just a Mailgun account and comment out the appropriate line(s) of code.
-You do you.
+Then in the GitHub repo under *Settings → Secrets and variables → Actions*, add `MG_API_KEY`,
+`MG_DOMAIN`, `MG_TO`, and optionally `MG_FROM`. Trigger a first run by hand from the *Actions* tab
+(*Run workflow*) to check it works.
 
-### Note on the timer 
+Two things to know about this setup:
 
-Note, I use `anacron` from the `cronie` package such that my user `crontab` looks like this (runs `anacron` every hour):
+- Pushing to Codeberg no longer updates the runner. Push to both remotes, or set Codeberg's origin
+  to push to GitHub as well.
+- GitHub disables scheduled workflows after 60 days of repository inactivity. It warns by email
+  first, and re-enabling is one click in the Actions tab.
+
+### Alternative: local cron
+
+The script is a plain CLI, so `anacron` still works. I use `cronie` with a user `crontab` that runs
+`anacron` hourly:
 
 ```cron
 0 * * * *  /usr/sbin/anacron -s -t "${HOME}/.local/etc/anacrontab" -S "${HOME}/.local/var/spool/anacron"
 ```
 
-and my user `anacrontab` (stored in `~/.local/etc/anacrontab` looks like this:
+with `~/.local/etc/anacrontab`:
 
 ```cron
 SHELL=/bin/sh
 PATH=/sbin:/bin:/usr/sbin:/usr/bin
 MAILTO=joao
-# the maximal random delay added to the base delay of the jobs
 RANDOM_DELAY=45
-# the jobs will be started during the following hours only
 START_HOURS_RANGE=3-22
 
 1  0  cron.mine    run-parts /home/joao/.local/etc/cron.daily/
 ```
 
-and my `/home/joao/.local/etc/cron.daily/` contains, amongst others, a simple executable file called `eprint`:
+and an executable `~/.local/etc/cron.daily/eprint` that exports the `MG_*` variables and runs the
+script. `cron` checks hourly whether `anacron` has run today; if not, it runs.
 
-```bash
-#!/bin/bash
-/home/joao/.pyenv/shims/python /home/joao/Work/personal/eprintupdates/eprint.py
+## Email format
+
+```
+New IACR ePrint papers matching your author list:
+
+Title   : The ePrint:2026/1591 Quantum Algorithm Does Not Solve DCP
+Link    : https://eprint.iacr.org/2026/1693
+PDF     : https://eprint.iacr.org/2026/1693.pdf
+Date    : Sat, 15 Aug 2026 03:46:13 +0000
+Authors : Aparna Gupte, Seyoon Ragavan, Mark Zhandry
+Matched : Mark Zhandry
 ```
 
-In the end, `cron` is checking every hour if `anacron` has run today. If it has not, `anacron` will run, and if not, nothing happens. 
-You could use `systemd-timer` but it just did not work for me and I got tired of trying to understand why and produce a fix.
+## Known limits
+
+The RSS feed only carries the 100 most recent papers. If nothing runs for long enough that more
+than 100 papers are posted, the missed ones are gone for good and you are never told. A daily run
+has a wide margin; a weekly one does not.
