@@ -41,3 +41,4 @@ Benjamin Grégoire
 Vincent Laporte
 Mark Zhandry
 Steven D Galbraith
+Akinori Hosoyamada
