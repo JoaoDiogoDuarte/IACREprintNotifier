@@ -48,3 +48,6 @@ Moni Naor
 Bruno Blanchet
 Pierre-Yves Strub
 François Dupressoir
+Chris Peikert
+Daniele Micciancio
+Oded Regev
