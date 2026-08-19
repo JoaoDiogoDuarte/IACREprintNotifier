@@ -148,7 +148,11 @@ def send_email(matches: list) -> bool:
         )
         resp.raise_for_status()
     except requests.RequestException as exc:
-        log.error("Failed to send email: %s", exc)
+        # Mailgun explains refusals in the response body, so surface it.
+        detail = ""
+        if exc.response is not None:
+            detail = f" -- Mailgun said: {exc.response.text[:500]}"
+        log.error("Failed to send email: %s%s", exc, detail)
         return False
 
     log.info("Email sent to %s", cfg["recipient"])
