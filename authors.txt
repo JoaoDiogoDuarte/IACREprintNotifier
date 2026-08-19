@@ -44,3 +44,7 @@ Steven D Galbraith
 Daniel R. Simon
 Dominique Unruh
 Ueli Maurer
+Moni Naor
+Bruno Blanchet
+Pierre-Yves Strub
+François Dupressoir
