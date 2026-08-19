@@ -42,3 +42,5 @@ Vincent Laporte
 Mark Zhandry
 Steven D Galbraith
 Daniel R. Simon
+Dominique Unruh
+Ueli Maurer
