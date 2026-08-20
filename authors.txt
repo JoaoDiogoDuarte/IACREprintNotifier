@@ -51,3 +51,4 @@ François Dupressoir
 Chris Peikert
 Daniele Micciancio
 Oded Regev
+Thomas Prest
