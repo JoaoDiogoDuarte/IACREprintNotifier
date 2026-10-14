@@ -45,9 +45,11 @@ Daniel R. Simon
 Dominique Unruh
 Ueli Maurer
 Moni Naor
+Oskar Goldhahn
 Bruno Blanchet
 Pierre-Yves Strub
 François Dupressoir
+Felix Rohrbach
 Chris Peikert
 Daniele Micciancio
 Oded Regev
